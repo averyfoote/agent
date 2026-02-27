@@ -10,39 +10,18 @@ the policy + scan to find gaps.
 from __future__ import annotations
 
 from agentward.comply.controls import (
-    CheckFunction,
     ComplianceControl,
     ComplianceFinding,
     ControlSeverity,
     PolicyFix,
     SkillAnalysis,
+    has_approval_for_skill,
+    has_outbound_block_for_skill,
+    has_write_restriction_for_skill,
 )
 from agentward.comply.frameworks import register_framework
 from agentward.policy.schema import AgentWardPolicy, DefaultAction, ViolationAction
-from agentward.scan.permissions import DataAccessType, ScanResult
-
-
-# -----------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------
-
-
-def _has_approval_for_skill(policy: AgentWardPolicy, skill: str) -> bool:
-    """Check if any approval rule covers the given skill by name.
-
-    Unlike ``rule.matches(skill, None)``, this also recognizes conditional
-    approval rules whose ``tool`` field matches the skill, regardless of
-    whether the argument conditions can be evaluated.  For compliance
-    purposes, having *any* approval gate on a skill counts.
-    """
-    for rule in policy.require_approval:
-        # Simple (non-conditional) rule: exact tool_name match
-        if rule.tool_name is not None and rule.tool_name == skill:
-            return True
-        # Conditional rule: tool field match is sufficient for compliance
-        if rule.conditional is not None and rule.conditional.tool == skill:
-            return True
-    return False
+from agentward.scan.permissions import ScanResult
 
 
 # -----------------------------------------------------------------------
@@ -193,37 +172,11 @@ def _check_integrity(
     findings: list[ComplianceFinding] = []
 
     for skill in sorted(analysis.phi_skills):
-        # Check if write-capable from scan
         if not analysis.skill_write_capable.get(skill, False):
             continue
 
-        # Check if policy restricts writes on this skill's own resource
-        # Only the skill's own resource counts (not unrelated resources)
-        has_write_restriction = False
-        if skill in policy.skills:
-            for resource_name, perms in policy.skills[skill].items():
-                # Only restrictions on the skill's own resource count
-                if resource_name != skill:
-                    continue
-                if perms.denied:
-                    has_write_restriction = True
-                    break
-                write_val = perms.actions.get("write")
-                delete_val = perms.actions.get("delete")
-                # write: false is always a valid restriction
-                if write_val is False:
-                    has_write_restriction = True
-                    break
-                # delete: false counts unless write is explicitly True
-                # (write: True + delete: False = partial, but write is allowed)
-                if delete_val is False and write_val is not True:
-                    has_write_restriction = True
-                    break
-
-        # Check if any approval rule covers this skill
-        has_approval = _has_approval_for_skill(policy, skill)
-
-        if not has_write_restriction and not has_approval:
+        if not has_write_restriction_for_skill(policy, skill) \
+                and not has_approval_for_skill(policy, skill):
             findings.append(ComplianceFinding(
                 control_id="hipaa-164.312.c.1",
                 skill=skill,
@@ -263,7 +216,7 @@ def _check_authentication(
             continue
 
         # Check if any approval rule covers this skill
-        has_approval = _has_approval_for_skill(policy, skill)
+        has_approval = has_approval_for_skill(policy, skill)
 
         if not has_approval:
             findings.append(ComplianceFinding(
@@ -299,28 +252,8 @@ def _check_transmission_security(
     phi_with_network = sorted(analysis.phi_skills & analysis.network_skills)
 
     for skill in phi_with_network:
-        # Check if outbound is blocked in policy
-        # Only network-related resources or the skill itself count
-        has_outbound_block = False
-        if skill in policy.skills:
-            for resource_name, perms in policy.skills[skill].items():
-                # Only network or skill's own resource count
-                if resource_name not in ("network", skill):
-                    continue
-                # Check for explicit outbound restriction
-                outbound = perms.actions.get("outbound")
-                if outbound is False:
-                    has_outbound_block = True
-                    break
-                # Denied on network resource or skill's own resource blocks outbound
-                if perms.denied:
-                    has_outbound_block = True
-                    break
-
-        # Check if any approval rule covers this skill
-        has_approval = _has_approval_for_skill(policy, skill)
-
-        if not has_outbound_block and not has_approval:
+        if not has_outbound_block_for_skill(policy, skill) \
+                and not has_approval_for_skill(policy, skill):
             findings.append(ComplianceFinding(
                 control_id="hipaa-164.312.e.1",
                 skill=skill,
